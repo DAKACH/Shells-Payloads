@@ -1176,3 +1176,7 @@ Upload `Upload.aspx` through the vulnerable web application upload form:
 |**Execution Engine**|`cmd.exe` process spawning|Native PowerShell Engine (.NET)|
 |**File Operations**|Primitive text / file reading|Integrated upload, download, and script staging|
 |**Primary Use Case**|Initial simple command execution|Advanced PowerShell post-exploitation and staging|
+
+---
+
+
