@@ -1106,3 +1106,73 @@ Upload `demo.aspx` through the vulnerable web application form.
 |**Network Footprint**|Logged in HTTP access logs (`access.log`)|Raw socket traffic; bypasses web server logging|
 
 ---
+
+# Antak Web Shell & ASPX Exploitation
+
+## Overview
+
+**Active Server Pages Extended (ASPX)** is an extension for Microsoft’s ASP.NET Framework. On IIS web servers, ASPX scripts are parsed server-side, allowing operators to execute .NET code and system commands within the web server process context.
+
+**Antak** is an ASPX-based web shell bundled inside the **Nishang** offensive PowerShell toolkit (`/usr/share/nishang/Antak-WebShell`). It functions as an in-browser PowerShell console, capable of executing memory-resident scripts, uploading/downloading files, and running encoded command streams on Windows IIS targets.
+
+```
+[ Unrestricted Upload / IIS ] ──> [ Upload antak.aspx ] ──> [ Authenticated Web Console ] ──> [ PowerShell / C2 Stager ]
+```
+
+## 1. Features & Security Controls of Antak
+
+Unlike standard primitive web shells, Antak provides advanced administrative and offensive capabilities out of the box:
+
+- **Authentication Lock:** Built-in username and password verification to prevent third-party access or unauthorized exploitation during assessments.
+- **In-Memory Script Execution:** Ability to load and execute PowerShell scripts directly into system memory without writing artifacts to disk.
+- **Process Execution Model:** Executes each command string in a isolated sub-process context while preserving directory tracking.
+- **In-Browser Shell UI:** Designed to visually mimic an interactive PowerShell console directly inside the web browser.
+
+## 2. Practical Configuration & Deployment Workflow
+
+### Step 1: Copy Payload & Configure Credentials
+
+Copy the default Antak script from the local Nishang directory to your working directory:
+
+```bash
+enamto@htb[/htb]$ cp /usr/share/nishang/Antak-WebShell/antak.aspx ./Upload.aspx
+```
+
+### Step 2: Set Credentials & Strip Static Signatures
+
+Open `Upload.aspx` in a text editor to set mandatory access credentials and remove signature flags:
+
+1. **Configure Credentials (Line 14):** Update `$User` and `$Password` variables to secure the web shell.
+2. **OPSEC Clean-up:** Remove default Nishang ASCII art headers and developer comments to evade static Antivirus (AV) and Web Application Firewall (WAF) signatures.
+
+```C#
+// Line 14 inside antak.aspx
+string User = "admin";
+string Password = "ComplexPassword123!";
+```
+
+![[Pasted image 20260812194834.png]]
+### Step 3: Upload & Authenticated Execution
+
+Upload `Upload.aspx` through the vulnerable web application upload form:
+
+1. **Upload Target:** File is saved to the IIS web directory (e.g., `status.inlanefreight.local\files\Upload.aspx`).
+2. **Web Browser Access:** Navigate to the shell endpoint:
+   `http://status.inlanefreight.local/files/Upload.aspx`
+3. **Login Prompt:** Enter the username (`admin`) and password (`ComplexPassword123!`) configured in Step 2.
+
+![[Pasted image 20260812194906.png]]
+
+4. **Command Execution:** Run PowerShell cmdlets (`Get-Process`, `Get-ChildItem`, `whoami`) or use the `help` menu to explore built-in transfer and execution switches.
+
+![[Pasted image 20260812194941.png]]
+
+## 3. Web Shell Comparison: Laudanum vs. Antak
+
+|**Feature / Metric**|**Laudanum (shell.aspx)**|**Antak (antak.aspx)**|
+|---|---|---|
+|**Framework Base**|Basic C# / ASPX|Nishang Offensive PowerShell Framework|
+|**Access Control**|IP Whitelisting (`allowedIps`)|Form Authentication (Username & Password)|
+|**Execution Engine**|`cmd.exe` process spawning|Native PowerShell Engine (.NET)|
+|**File Operations**|Primitive text / file reading|Integrated upload, download, and script staging|
+|**Primary Use Case**|Initial simple command execution|Advanced PowerShell post-exploitation and staging|
