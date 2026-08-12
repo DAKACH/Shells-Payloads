@@ -43,6 +43,8 @@ In cybersecurity and offensive operations, a **payload** refers to the specific 
 3. **Execution:** Deploy the payload via the exploit vector.
 4. **Interactive Access:** Catch the incoming shell (Reverse Shell) or connect to the bound port (Bind Shell) to begin post-exploitation.
 
+---
+
 # Shell Anatomy & Command Interpreters
 
 ## Overview
